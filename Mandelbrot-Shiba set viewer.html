@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>하이브리드 집합 — B안 3D (단면 ver)</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0a0a0f; color:#e0e0e0; font-family:-apple-system,"Segoe UI",sans-serif;
+    display:flex; flex-direction:column; align-items:center; min-height:100vh; padding:16px; }
+  h1 { font-size:18px; margin-bottom:4px; letter-spacing:1px; }
+  .sub { font-size:12px; color:#888; margin-bottom:14px; }
+  canvas { border:1px solid #333; cursor:grab; display:block; background:#000; }
+  canvas:active { cursor:grabbing; }
+  .controls { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; justify-content:center; max-width:680px; align-items:center; }
+  button { background:#1a1a24; color:#e0e0e0; border:1px solid #444; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button:hover { background:#2a2a38; border-color:#666; }
+  button.active { background:#5a3a8a; border-color:#8a5aba; color:#fff; }
+  .slider-box { display:flex; align-items:center; gap:10px; background:#14141c; border:1px solid #444; border-radius:6px; padding:8px 12px; }
+  .slider-box input { width:110px; }
+  .val { font-size:14px; font-weight:bold; color:#b58aea; min-width:40px; text-align:center; }
+  .info { font-size:11px; color:#777; margin-top:12px; text-align:center; line-height:1.6; max-width:600px; }
+  .status { font-size:11px; color:#b58aea; margin-top:8px; }
+  .seg { display:flex; border:1px solid #444; border-radius:6px; overflow:hidden; }
+  .seg button { border:none; border-radius:0; border-right:1px solid #444; }
+  .seg button:last-child { border-right:none; }
+</style>
+</head>
+<body>
+  <h1>하이브리드 집합 — 3D + 단면</h1>
+  <div class="sub">드래그로 회전 · 단면으로 속 갈라보기 · killmkill97</div>
+
+  <canvas id="cv" width="600" height="600"></canvas>
+  <div class="status" id="status">계산 중...</div>
+
+  <div class="controls">
+    <div class="slider-box">
+      <span style="font-size:13px;">차수 n</span>
+      <input type="range" id="pSlider" min="2" max="6" step="1" value="5">
+      <span class="val" id="pVal">5</span>
+    </div>
+    <div class="slider-box">
+      <span style="font-size:13px;">해상도</span>
+      <input type="range" id="resSlider" min="40" max="120" step="10" value="80">
+      <span class="val" id="resVal">80</span>
+    </div>
+    <button id="recalcBtn">다시 계산</button>
+  </div>
+
+  <div class="controls">
+    <span style="font-size:12px;">단면 축:</span>
+    <div class="seg" id="clipAxis">
+      <button data-axis="none" class="active">끄기</button>
+      <button data-axis="0">실수(빨강)</button>
+      <button data-axis="1">i(초록)</button>
+      <button data-axis="2">κ(파랑)</button>
+    </div>
+    <div class="slider-box">
+      <span style="font-size:13px;">자르는 위치</span>
+      <input type="range" id="clipSlider" min="-2" max="2" step="0.05" value="0" disabled>
+      <span class="val" id="clipVal">0.00</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="spinBtn">자동 회전 ▶</button>
+    <button id="resetBtn">시점 리셋</button>
+    <button id="saveBtn">이미지 저장</button>
+  </div>
+
+  <div class="info">
+    <b>좌클릭 드래그</b> 회전 · <b>가운데(휠) 드래그</b> 중심 이동 · <b>스크롤</b> 확대 · 축: 빨강=실수, 초록=i, 파랑=κ<br>
+    <b>단면 축</b>을 고르고 <b>자르는 위치</b> 슬라이더를 움직이면 그 면 너머가 잘려서 속이 보여요.<br>
+    차수·해상도 바꾸면 <b>다시 계산</b>을 눌러주세요.
+  </div>
+
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const W=cv.width, H=cv.height;
+let power=5, res=80;
+let points=[];
+let rotX=-0.5, rotY=0.6, zoom=180;
+let panX=0, panY=0;
+let dragging=false, panning=false, lastX=0, lastY=0;
+let spin=false;
+let clipAxis=-1;      // -1=off, 0=real,1=i,2=k
+let clipPos=0;
+const MAX_ITER=20;
+
+// 시바 공간 곱셈 (i²=-1, k²=+1, ik는 k로 흡수)
+function cube_mul(z1,z2){
+  let [r1,i1,k1]=z1, [r2,i2,k2]=z2;
+  let r=r1*r2 - i1*i2 + k1*k2;
+  let i=r1*i2 + i1*r2;
+  let k=r1*k2 + k1*r2 + (i1*k2 + k1*i2);
+  return [r,i,k];
+}
+function zpow(z,n){ let res=[1,0,0]; for(let m=0;m<n;m++) res=cube_mul(res,z); return res; }
+
+function compute(){
+  document.getElementById('status').textContent='계산 중...';
+  points=[];
+  const R=2.0;
+  setTimeout(()=>{
+    for(let xi=0; xi<res; xi++)
+      for(let yi=0; yi<res; yi++)
+        for(let zi=0; zi<res; zi++){
+          let cr=-R+2*R*xi/(res-1), ci=-R+2*R*yi/(res-1), ck=-R+2*R*zi/(res-1);
+          let zr=0,zii=0,zk=0, escaped=false;
+          for(let n=0;n<MAX_ITER;n++){
+            let [pr,pi,pk]=zpow([zr,zii,zk],power);
+            zr=pr+cr; zii=pi+ci; zk=pk+ck;
+            if(zr*zr+zii*zii+zk*zk>4){escaped=true;break;}
+          }
+          if(!escaped) points.push([cr,ci,ck]);
+        }
+    document.getElementById('status').textContent='점 '+points.length+'개';
+    draw();
+  },20);
+}
+
+function draw(){
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  const cosX=Math.cos(rotX),sinX=Math.sin(rotX);
+  const cosY=Math.cos(rotY),sinY=Math.sin(rotY);
+  let proj=[];
+  for(let p of points){
+    // 단면 클리핑: 선택축 좌표가 clipPos보다 크면 숨김
+    if(clipAxis>=0 && p[clipAxis] > clipPos) continue;
+    let [x,y,z]=p;
+    let x1=x*cosY - z*sinY;
+    let z1=x*sinY + z*cosY;
+    let y2=y*cosX - z1*sinX;
+    let z2=y*sinX + z1*cosX;
+    proj.push([x1,y2,z2, p]);
+  }
+  proj.sort((a,b)=>a[2]-b[2]);
+  for(let pp of proj){
+    let [x,y,z,orig]=pp;
+    let sx=W/2 + panX + x*zoom, sy=H/2 + panY - y*zoom;
+    let t=(z+2)/4;
+    // 단면이 켜져 있으면 잘린 면(clipPos 근처)을 밝게 강조
+    let nearCut = (clipAxis>=0 && Math.abs(orig[clipAxis]-clipPos)<0.08);
+    let r,g,b;
+    if(nearCut){ r=255; g=230; b=120; }  // 절단면 = 노랑 강조
+    else { r=Math.floor(120+100*t); g=Math.floor(40+60*t); b=Math.floor(160+90*t); }
+    let size=Math.max(1, 2.5*(0.5+t));
+    ctx.fillStyle='rgba('+r+','+g+','+b+','+(nearCut?0.95:0.7)+')';
+    ctx.fillRect(sx-size/2, sy-size/2, size, size);
+  }
+  drawAxis(2,0,0,'#C0392B',cosX,sinX,cosY,sinY);
+  drawAxis(0,2,0,'#27AE60',cosX,sinX,cosY,sinY);
+  drawAxis(0,0,2,'#2471A3',cosX,sinX,cosY,sinY);
+}
+function drawAxis(x,y,z,col,cosX,sinX,cosY,sinY){
+  let x1=x*cosY - z*sinY, z1=x*sinY + z*cosY;
+  let y2=y*cosX - z1*sinX;
+  ctx.strokeStyle=col; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(W/2+panX,H/2+panY); ctx.lineTo(W/2+panX+x1*zoom, H/2+panY-y2*zoom); ctx.stroke();
+}
+
+// ===== 좌클릭=회전, 가운데(휠)클릭=중심 이동(팬) =====
+cv.addEventListener('mousedown',e=>{
+  if(e.button===1){ panning=true; }      // 가운데 버튼 = 팬
+  else { dragging=true; }                 // 좌클릭 = 회전
+  lastX=e.clientX; lastY=e.clientY;
+  e.preventDefault();
+});
+// 가운데 클릭 기본 스크롤 동작 막기
+cv.addEventListener('auxclick',e=>{ if(e.button===1) e.preventDefault(); });
+cv.addEventListener('mousedown',e=>{ if(e.button===1) e.preventDefault(); });
+window.addEventListener('mouseup',()=>{dragging=false; panning=false;});
+window.addEventListener('mousemove',e=>{
+  if(panning){
+    panX += (e.clientX-lastX);
+    panY += (e.clientY-lastY);
+    lastX=e.clientX; lastY=e.clientY; draw();
+  } else if(dragging){
+    rotY += (e.clientX-lastX)*0.01;   // 반대로
+    rotX -= (e.clientY-lastY)*0.01;   // 반대로
+    lastX=e.clientX; lastY=e.clientY; draw();
+  }
+});
+cv.addEventListener('wheel',e=>{e.preventDefault(); zoom*=(e.deltaY<0?1.1:0.9); draw();});
+
+document.getElementById('pSlider').addEventListener('input',e=>{power=parseInt(e.target.value); document.getElementById('pVal').textContent=power;});
+document.getElementById('resSlider').addEventListener('input',e=>{res=parseInt(e.target.value); document.getElementById('resVal').textContent=res;});
+document.getElementById('recalcBtn').onclick=compute;
+document.getElementById('resetBtn').onclick=()=>{rotX=-0.5; rotY=0.6; zoom=180; panX=0; panY=0; draw();};
+document.getElementById('saveBtn').onclick=()=>{const a=document.createElement('a'); a.download='hybrid_3d_cut_n'+power+'.png'; a.href=cv.toDataURL(); a.click();};
+
+// 단면 축 선택
+const clipSlider=document.getElementById('clipSlider');
+document.querySelectorAll('#clipAxis button').forEach(btn=>{
+  btn.onclick=()=>{
+    document.querySelectorAll('#clipAxis button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    let ax=btn.dataset.axis;
+    if(ax==='none'){ clipAxis=-1; clipSlider.disabled=true; }
+    else { clipAxis=parseInt(ax); clipSlider.disabled=false; }
+    draw();
+  };
+});
+clipSlider.addEventListener('input',e=>{ clipPos=parseFloat(e.target.value); document.getElementById('clipVal').textContent=clipPos.toFixed(2); draw(); });
+
+const spinBtn=document.getElementById('spinBtn');
+spinBtn.onclick=()=>{spin=!spin; spinBtn.textContent=spin?'자동 회전 ⏸':'자동 회전 ▶'; if(spin) spinLoop();};
+function spinLoop(){ if(!spin) return; rotY-=0.01; draw(); requestAnimationFrame(spinLoop); } // 회전도 반대 방향
+
+compute();
+</script>
+</body>
+</html>
